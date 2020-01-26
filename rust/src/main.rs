@@ -6,6 +6,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use datafusion::execution::context::ExecutionContext;
 
+use arrow::record_batch::RecordBatch;
 use flight::{
     flight_service_server::FlightService, flight_service_server::FlightServiceServer, Action,
     ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo, HandshakeRequest,
@@ -57,19 +58,17 @@ impl FlightService for FlightServiceImpl {
                     .create_physical_plan(&plan, 1024 * 1024)
                     .map_err(|e| to_tonic_err(&e))?;
 
+                //TODO make this async
+
                 // execute the query
                 let results = ctx.collect(plan.as_ref()).map_err(|e| to_tonic_err(&e))?;
 
-                //TODO how to write results back?
+                let flights: Vec<Result<FlightData, Status>> =
+                    results.iter().map(|batch| to_flight_data(batch)).collect();
 
-                let flights: Vec<FlightData> = results.iter().map(|batch| FlightData {
-                    app_metadata: vec![],
-                    data_header: vec![],
-                    data_body: vec![],
-                    flight_descriptor: None,
-                }).collect();
+                let output = futures::stream::iter(flights);
 
-                Err(Status::unimplemented("Not yet implemented"))
+                Ok(Response::new(Box::pin(output) as Self::DoGetStream))
             }
             Err(e) => Err(Status::unimplemented(format!("Invalid ticket: {:?}", e))),
         }
@@ -123,6 +122,16 @@ impl FlightService for FlightServiceImpl {
     ) -> Result<Response<Self::ListActionsStream>, Status> {
         Err(Status::unimplemented("Not yet implemented"))
     }
+}
+
+fn to_flight_data(_batch: &RecordBatch) -> Result<FlightData, Status> {
+    //TODO implement fully
+    Ok(FlightData {
+        app_metadata: vec![],
+        data_header: vec![],
+        data_body: vec![],
+        flight_descriptor: None,
+    })
 }
 
 fn to_tonic_err(e: &datafusion::error::ExecutionError) -> Status {

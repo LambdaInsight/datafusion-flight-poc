@@ -12,6 +12,9 @@ use flight::{
     ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo, HandshakeRequest,
     HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
+use arrow::ipc::writer::FileWriter;
+use std::io::{Read, BufWriter};
+use std::fs::File;
 
 #[derive(Clone)]
 pub struct FlightServiceImpl {}
@@ -43,11 +46,10 @@ impl FlightService for FlightServiceImpl {
                 // create local execution context
                 let mut ctx = ExecutionContext::new();
 
-                // register parquet file with the execution context
-                //                ctx.register_parquet(
-                //                    "alltypes_plain",
-                //                    &format!("{}/alltypes_plain.parquet", testdata),
-                //                ).unwrap();
+                ctx.register_parquet(
+                    "alltypes_plain",
+                    "alltypes_plain.snappy.parquet",
+                ).unwrap();
 
                 // create the query plan
                 let plan = ctx
@@ -124,12 +126,34 @@ impl FlightService for FlightServiceImpl {
     }
 }
 
-fn to_flight_data(_batch: &RecordBatch) -> Result<FlightData, Status> {
+fn to_flight_data(batch: &RecordBatch) -> Result<FlightData, Status> {
     //TODO implement fully
+
+    //HACK write to file and read back because I have to pass ownership of writer to FileWriter
+    // and I couldn't figure out how to do that and still be able to access the data afterwards
+    {
+        let tmp = BufWriter::new(File::create("tmp.tmp").unwrap());
+        let mut w = FileWriter::try_new(tmp, batch.schema()).unwrap();
+        w.write(batch).unwrap();
+        w.finish().unwrap();
+    }
+
+    let mut f= File::open("tmp.tmp").unwrap();
+    let mut v = Vec::new();
+    f.read_to_end(&mut v)?;
+
+    println!("{}", v.len());
+
+//    let fd = FlightDescriptor {
+//        cmd: (),
+//        path: (),
+//        r#type: (),
+//    };
+
     Ok(FlightData {
         app_metadata: vec![],
         data_header: vec![],
-        data_body: vec![],
+        data_body: v,
         flight_descriptor: None,
     })
 }

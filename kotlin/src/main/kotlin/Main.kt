@@ -16,9 +16,10 @@ class Test {
 
             val callOptions = CallOptions.timeout(5, TimeUnit.SECONDS)
 
-            val stream = client.getStream(Ticket("SELECT foo FROM bar".toByteArray()), callOptions)
+            val stream = client.getStream(Ticket("SELECT id FROM alltypes_plain".toByteArray()), callOptions)
 
             while (stream.next()) {
+                println("got batch")
                 //TODO
             }
         }

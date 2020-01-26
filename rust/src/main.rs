@@ -7,9 +7,9 @@ use tonic::{Request, Response, Status, Streaming};
 use datafusion::execution::context::ExecutionContext;
 
 use flight::{
-    flight_service_server::FlightService, flight_service_server::FlightServiceServer,
-    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
-    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
+    flight_service_server::FlightService, flight_service_server::FlightServiceServer, Action,
+    ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo, HandshakeRequest,
+    HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
 
 #[derive(Clone)]
@@ -17,20 +17,56 @@ pub struct FlightServiceImpl {}
 
 #[tonic::async_trait]
 impl FlightService for FlightServiceImpl {
-    type HandshakeStream = Pin<
-        Box<dyn Stream<Item = Result<HandshakeResponse, Status>> + Send + Sync + 'static>,
-    >;
+    type HandshakeStream =
+        Pin<Box<dyn Stream<Item = Result<HandshakeResponse, Status>> + Send + Sync + 'static>>;
     type ListFlightsStream =
-    Pin<Box<dyn Stream<Item = Result<FlightInfo, Status>> + Send + Sync + 'static>>;
+        Pin<Box<dyn Stream<Item = Result<FlightInfo, Status>> + Send + Sync + 'static>>;
     type DoGetStream =
-    Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync + 'static>>;
+        Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync + 'static>>;
     type DoPutStream =
-    Pin<Box<dyn Stream<Item = Result<PutResult, Status>> + Send + Sync + 'static>>;
-    type DoActionStream = Pin<
-        Box<dyn Stream<Item = Result<flight::Result, Status>> + Send + Sync + 'static>,
-    >;
+        Pin<Box<dyn Stream<Item = Result<PutResult, Status>> + Send + Sync + 'static>>;
+    type DoActionStream =
+        Pin<Box<dyn Stream<Item = Result<flight::Result, Status>> + Send + Sync + 'static>>;
     type ListActionsStream =
-    Pin<Box<dyn Stream<Item = Result<ActionType, Status>> + Send + Sync + 'static>>;
+        Pin<Box<dyn Stream<Item = Result<ActionType, Status>> + Send + Sync + 'static>>;
+
+    async fn do_get(
+        &self,
+        request: Request<Ticket>,
+    ) -> Result<Response<Self::DoGetStream>, Status> {
+        let ticket = request.into_inner();
+        match String::from_utf8(ticket.ticket.to_vec()) {
+            Ok(sql) => {
+                println!("do_get: {}", sql);
+
+                // create local execution context
+                let mut ctx = ExecutionContext::new();
+
+                // register parquet file with the execution context
+                //                ctx.register_parquet(
+                //                    "alltypes_plain",
+                //                    &format!("{}/alltypes_plain.parquet", testdata),
+                //                ).unwrap();
+
+                // create the query plan
+                let plan = ctx
+                    .create_logical_plan(&sql)
+                    .map_err(|e| to_tonic_err(&e))?;
+                let plan = ctx.optimize(&plan).map_err(|e| to_tonic_err(&e))?;
+                let plan = ctx
+                    .create_physical_plan(&plan, 1024 * 1024)
+                    .map_err(|e| to_tonic_err(&e))?;
+
+                // execute the query
+                let results = ctx.collect(plan.as_ref()).map_err(|e| to_tonic_err(&e))?;
+
+                //TODO how to write results back?
+
+                Err(Status::unimplemented("Not yet implemented"))
+            }
+            Err(e) => Err(Status::unimplemented(format!("Invalid ticket: {:?}", e))),
+        }
+    }
 
     async fn handshake(
         &self,
@@ -60,40 +96,6 @@ impl FlightService for FlightServiceImpl {
         Err(Status::unimplemented("Not yet implemented"))
     }
 
-    async fn do_get(
-        &self,
-        request: Request<Ticket>,
-    ) -> Result<Response<Self::DoGetStream>, Status> {
-        let ticket = request.into_inner();
-        match String::from_utf8(ticket.ticket.to_vec()) {
-            Ok(sql) => {
-                println!("do_get: {}", sql);
-
-                // create local execution context
-                let mut ctx = ExecutionContext::new();
-
-                // register parquet file with the execution context
-//                ctx.register_parquet(
-//                    "alltypes_plain",
-//                    &format!("{}/alltypes_plain.parquet", testdata),
-//                ).unwrap();
-
-                // create the query plan
-                let plan = ctx.create_logical_plan(&sql).unwrap();
-                let plan = ctx.optimize(&plan).unwrap();
-                let plan = ctx.create_physical_plan(&plan, 1024 * 1024).unwrap();
-
-                // execute the query
-                let results = ctx.collect(plan.as_ref()).unwrap();
-
-                //TODO how to write results back?
-
-                Err(Status::unimplemented("Not yet implemented"))
-            }
-            Err(e) => Err(Status::unimplemented(format!("Invalid ticket: {:?}", e)))
-        }
-    }
-
     async fn do_put(
         &self,
         _request: Request<Streaming<FlightData>>,
@@ -114,6 +116,10 @@ impl FlightService for FlightServiceImpl {
     ) -> Result<Response<Self::ListActionsStream>, Status> {
         Err(Status::unimplemented("Not yet implemented"))
     }
+}
+
+fn to_tonic_err(e: &datafusion::error::ExecutionError) -> Status {
+    Status::unimplemented(format!("{:?}", e))
 }
 
 #[tokio::main]

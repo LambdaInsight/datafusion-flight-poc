@@ -62,6 +62,13 @@ impl FlightService for FlightServiceImpl {
 
                 //TODO how to write results back?
 
+                let flights: Vec<FlightData> = results.iter().map(|batch| FlightData {
+                    app_metadata: vec![],
+                    data_header: vec![],
+                    data_body: vec![],
+                    flight_descriptor: None,
+                }).collect();
+
                 Err(Status::unimplemented("Not yet implemented"))
             }
             Err(e) => Err(Status::unimplemented(format!("Invalid ticket: {:?}", e))),

@@ -13,8 +13,11 @@ use flight::{
     HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
 use arrow::ipc::writer::FileWriter;
-use std::io::{Read, BufWriter};
+use arrow::ipc::writer::write_schema;
+
+use std::io::{Read, BufWriter, Write};
 use std::fs::File;
+use arrow::datatypes::Schema;
 
 #[derive(Clone)]
 pub struct FlightServiceImpl {}
@@ -127,10 +130,20 @@ impl FlightService for FlightServiceImpl {
 }
 
 fn to_flight_data(batch: &RecordBatch) -> Result<FlightData, Status> {
-    //TODO implement fully
+
+    println!("{:?}", batch.schema());
 
     //HACK write to file and read back because I have to pass ownership of writer to FileWriter
     // and I couldn't figure out how to do that and still be able to access the data afterwards
+    {
+        let mut tmp = BufWriter::new(File::create("tmp.tmp").unwrap());
+        write_schema(&mut tmp, batch.schema()).unwrap();
+    }
+
+    let mut f = File::open("tmp.tmp").unwrap();
+    let mut header = Vec::new();
+    f.read_to_end(&mut header)?;
+
     {
         let tmp = BufWriter::new(File::create("tmp.tmp").unwrap());
         let mut w = FileWriter::try_new(tmp, batch.schema()).unwrap();
@@ -139,22 +152,22 @@ fn to_flight_data(batch: &RecordBatch) -> Result<FlightData, Status> {
     }
 
     let mut f= File::open("tmp.tmp").unwrap();
-    let mut v = Vec::new();
-    f.read_to_end(&mut v)?;
+    let mut body = Vec::new();
+    f.read_to_end(&mut body)?;
 
-    println!("{}", v.len());
-
-//    let fd = FlightDescriptor {
-//        cmd: (),
-//        path: (),
-//        r#type: (),
-//    };
+    println!("Encoded {} bytes for header, {} bytes for body", header.len(), v.len());
 
     Ok(FlightData {
-        app_metadata: vec![],
-        data_header: vec![],
-        data_body: v,
         flight_descriptor: None,
+        app_metadata: vec![],
+        /// Header for message data as described in Message.fbs::Message
+        data_header: header,
+        /// The actual batch of Arrow data. Preferably handled with minimal-copies
+        /// coming last in the definition to help with sidecar patterns (it is
+        /// expected that some implementations will fetch this field off the wire
+        /// with specialized code to avoid extra memory copies).
+        ///
+        data_body: v,
     })
 }
 

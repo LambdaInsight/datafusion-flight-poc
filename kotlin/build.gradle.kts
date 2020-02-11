@@ -54,6 +54,7 @@ dependencies {
     // Use the Kotlin JUnit integration.
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
     testImplementation("org.junit.jupiter:junit-jupiter:5.5.2")
+    testImplementation("junit:junit:4.12")
 }
 
 application {

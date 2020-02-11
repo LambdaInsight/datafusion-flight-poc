@@ -133,11 +133,14 @@ fn to_flight_data(batch: &RecordBatch) -> Result<FlightData, Status> {
 
     println!("{:?}", batch.schema());
 
+    let mut v: Vec<u8> = vec![];
+    let mut w : &dyn Write = &v;
+
     //HACK write to file and read back because I have to pass ownership of writer to FileWriter
     // and I couldn't figure out how to do that and still be able to access the data afterwards
     {
-        let mut tmp = BufWriter::new(File::create("tmp.tmp").unwrap());
-        write_schema(&mut tmp, batch.schema()).unwrap();
+        //let mut tmp = BufWriter::new(File::create("tmp.tmp").unwrap());
+        write_schema(w.by_ref(), batch.schema()).unwrap();
     }
 
     let mut f = File::open("tmp.tmp").unwrap();

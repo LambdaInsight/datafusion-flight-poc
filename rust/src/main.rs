@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 use std::pin::Pin;
 
 use futures::Stream;
@@ -6,34 +23,29 @@ use tonic::{Request, Response, Status, Streaming};
 
 use datafusion::execution::context::ExecutionContext;
 
-use arrow::record_batch::RecordBatch;
 use flight::{
-    flight_service_server::FlightService, flight_service_server::FlightServiceServer, Action,
-    ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo, HandshakeRequest,
-    HandshakeResponse, PutResult, SchemaResult, Ticket,
+    flight_service_server::FlightService, flight_service_server::FlightServiceServer,
+    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
+    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
-use arrow::ipc::writer::FileWriter;
-use arrow::ipc::writer::write_schema;
-
-use std::io::{Read, BufWriter, Write};
-use std::fs::File;
-use arrow::datatypes::Schema;
 
 #[derive(Clone)]
 pub struct FlightServiceImpl {}
 
 #[tonic::async_trait]
 impl FlightService for FlightServiceImpl {
-    type HandshakeStream =
-        Pin<Box<dyn Stream<Item = Result<HandshakeResponse, Status>> + Send + Sync + 'static>>;
+    type HandshakeStream = Pin<
+        Box<dyn Stream<Item = Result<HandshakeResponse, Status>> + Send + Sync + 'static>,
+    >;
     type ListFlightsStream =
         Pin<Box<dyn Stream<Item = Result<FlightInfo, Status>> + Send + Sync + 'static>>;
     type DoGetStream =
         Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync + 'static>>;
     type DoPutStream =
         Pin<Box<dyn Stream<Item = Result<PutResult, Status>> + Send + Sync + 'static>>;
-    type DoActionStream =
-        Pin<Box<dyn Stream<Item = Result<flight::Result, Status>> + Send + Sync + 'static>>;
+    type DoActionStream = Pin<
+        Box<dyn Stream<Item = Result<flight::Result, Status>> + Send + Sync + 'static>,
+    >;
     type ListActionsStream =
         Pin<Box<dyn Stream<Item = Result<ActionType, Status>> + Send + Sync + 'static>>;
 
@@ -49,33 +61,47 @@ impl FlightService for FlightServiceImpl {
                 // create local execution context
                 let mut ctx = ExecutionContext::new();
 
+                let testdata = std::env::var("PARQUET_TEST_DATA")
+                    .expect("PARQUET_TEST_DATA not defined");
+
+                // register parquet file with the execution context
                 ctx.register_parquet(
                     "alltypes_plain",
-                    "alltypes_plain.snappy.parquet",
-                ).unwrap();
+                    &format!("{}/alltypes_plain.parquet", testdata),
+                )
+                .map_err(|e| to_tonic_err(&e))?;
 
                 // create the query plan
                 let plan = ctx
                     .create_logical_plan(&sql)
+                    .and_then(|plan| ctx.optimize(&plan))
+                    .and_then(|plan| ctx.create_physical_plan(&plan, 1024 * 1024))
                     .map_err(|e| to_tonic_err(&e))?;
-                let plan = ctx.optimize(&plan).map_err(|e| to_tonic_err(&e))?;
-                let plan = ctx
-                    .create_physical_plan(&plan, 1024 * 1024)
-                    .map_err(|e| to_tonic_err(&e))?;
-
-                //TODO make this async
 
                 // execute the query
                 let results = ctx.collect(plan.as_ref()).map_err(|e| to_tonic_err(&e))?;
+                if results.is_empty() {
+                    return Err(Status::internal("There were no results from ticket"));
+                }
 
-                let flights: Vec<Result<FlightData, Status>> =
-                    results.iter().map(|batch| to_flight_data(batch)).collect();
+                // add an initial FlightData message that sends schema
+                let schema = plan.schema();
+                let mut flights: Vec<Result<FlightData, Status>> =
+                    vec![Ok(FlightData::from(schema.as_ref()))];
+
+                let mut batches: Vec<Result<FlightData, Status>> = results
+                    .iter()
+                    .map(|batch| Ok(FlightData::from(batch)))
+                    .collect();
+
+                // append batch vector to schema vector, so that the first message sent is the schema
+                flights.append(&mut batches);
 
                 let output = futures::stream::iter(flights);
 
                 Ok(Response::new(Box::pin(output) as Self::DoGetStream))
             }
-            Err(e) => Err(Status::unimplemented(format!("Invalid ticket: {:?}", e))),
+            Err(e) => Err(Status::invalid_argument(format!("Invalid ticket: {:?}", e))),
         }
     }
 
@@ -129,53 +155,8 @@ impl FlightService for FlightServiceImpl {
     }
 }
 
-fn to_flight_data(batch: &RecordBatch) -> Result<FlightData, Status> {
-
-    println!("{:?}", batch.schema());
-
-    let mut v: Vec<u8> = vec![];
-    let mut w : &dyn Write = &v;
-
-    //HACK write to file and read back because I have to pass ownership of writer to FileWriter
-    // and I couldn't figure out how to do that and still be able to access the data afterwards
-    {
-        //let mut tmp = BufWriter::new(File::create("tmp.tmp").unwrap());
-        write_schema(w.by_ref(), batch.schema()).unwrap();
-    }
-
-    let mut f = File::open("tmp.tmp").unwrap();
-    let mut header = Vec::new();
-    f.read_to_end(&mut header)?;
-
-    {
-        let tmp = BufWriter::new(File::create("tmp.tmp").unwrap());
-        let mut w = FileWriter::try_new(tmp, batch.schema()).unwrap();
-        w.write(batch).unwrap();
-        w.finish().unwrap();
-    }
-
-    let mut f= File::open("tmp.tmp").unwrap();
-    let mut body = Vec::new();
-    f.read_to_end(&mut body)?;
-
-    println!("Encoded {} bytes for header, {} bytes for body", header.len(), v.len());
-
-    Ok(FlightData {
-        flight_descriptor: None,
-        app_metadata: vec![],
-        /// Header for message data as described in Message.fbs::Message
-        data_header: header,
-        /// The actual batch of Arrow data. Preferably handled with minimal-copies
-        /// coming last in the definition to help with sidecar patterns (it is
-        /// expected that some implementations will fetch this field off the wire
-        /// with specialized code to avoid extra memory copies).
-        ///
-        data_body: v,
-    })
-}
-
 fn to_tonic_err(e: &datafusion::error::ExecutionError) -> Status {
-    Status::unimplemented(format!("{:?}", e))
+    Status::internal(format!("{:?}", e))
 }
 
 #[tokio::main]
